@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# Runtime dependencies (desktop UI + diagram renderer)
+#
+# Verified on: Windows 11 + Python 3.11.0 + PySide6 6.11.2
+#   python -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# Pins are exact (==) so every machine behaves like the verified one.
+# pyproject.toml carries the loose lower bounds for installable distribution.
+#
+# NOTE: keep this file pure ASCII. pip decodes it with the OS locale encoding
+# (cp936/GBK on Chinese Windows), so any non-ASCII byte raises
+# UnicodeDecodeError before a single requirement is parsed.
+# ---------------------------------------------------------------------------
+
+# Qt 6.11 bindings. Install the full package: it pulls in PySide6-Essentials
+# and PySide6-Addons, the latter providing QtSvg used by render_svg.py.
+PySide6==6.11.2
+
+# Image buffers and histogram math (frames are uint8 H x W x 3 / BGR ndarrays).
+numpy==2.4.6
+
+# Video recording (mp4v) and BGR<->RGB conversion.
+opencv-python==5.0.0.93
+
+# The OpenMV device shows up as a USB CDC virtual COM port; pyserial is the
+# only device-communication dependency.
+pyserial==3.5
+
+# pyusb was listed earlier, but nothing in the source imports usb (the link is
+# pyserial end to end), so it was dropped. Re-add it only if we switch to libusb.
