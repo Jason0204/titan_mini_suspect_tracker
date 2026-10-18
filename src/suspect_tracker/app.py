@@ -1,10 +1,34 @@
 import sys
 from collections.abc import Callable
 
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from suspect_tracker.resources import asset_path
 from suspect_tracker.single_instance import SingleInstance
 from suspect_tracker.ui.main_window import MainWindow
+
+
+def _apply_app_identity(app: QApplication) -> None:
+    """Window/taskbar icon + taskbar grouping, shared by source runs and frozen builds."""
+    icon_path = asset_path("icon.ico")
+    if icon_path.is_file():
+        icon = QIcon(str(icon_path))
+        if not icon.isNull():
+            app.setWindowIcon(icon)
+
+    # Changed 2026-10-18: give the process its own AppUserModelID, otherwise Windows
+    # groups the taskbar button under python.exe / the onefile launcher and shows
+    # the interpreter icon instead of ours.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "TitanMini.SuspectTracker"
+            )
+        except Exception:  # pragma: no cover - cosmetic only
+            pass
 
 
 # Changed 2026-09-20: Keep one entry point shared by scripts and packaged builds.
@@ -19,6 +43,7 @@ def main(
     app = QApplication(sys.argv)
     app.setApplicationName("Titan Suspect Tracker")
     app.setOrganizationName("Titan Mini Prototype")
+    _apply_app_identity(app)
 
     # Changed 2026-09-20: Record packaged startup stages to diagnose invisible windows.
     log("Creating MainWindow")

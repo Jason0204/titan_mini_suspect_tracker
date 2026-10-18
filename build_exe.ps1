@@ -25,14 +25,18 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to install build requirements (exit code $LASTEXITCODE)."
 }
 # Changed 2026-09-20: Build one self-contained EXE so Python DLLs cannot be separated.
+# Changed 2026-10-18: --icon embeds the icon into the EXE resource (Explorer/taskbar);
+# the assets folder is collected so the runtime window icon resolves from _MEIPASS.
 & $python -m PyInstaller `
     --noconfirm `
     --clean `
     --windowed `
     --onefile `
     --name TitanSuspectTracker `
+    --icon "src\suspect_tracker\assets\icon.ico" `
     --paths src `
     --add-data "src\device\openmv_ae3_raw_jpeg.py;device" `
+    --add-data "src\suspect_tracker\assets;assets" `
     src\suspect_tracker\__main__.py
 if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller build failed (exit code $LASTEXITCODE). Close any running TitanSuspectTracker.exe and retry."

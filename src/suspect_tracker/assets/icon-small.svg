@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!--
+    Titan Mini Suspect Tracker 应用图标（简化版，16/24/32px 使用）。
+    与 icon.svg 相同，但去掉了取景角标：小尺寸下角标会糊成一团，
+    只保留深色底 + 红框 + 白色行人，保证 16px 仍能认出人形。
+    重新生成 ico/png：.venv/Scripts/python.exe src/tools/make_icon.py
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#232E40"/>
+      <stop offset="1" stop-color="#121821"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F24B51"/>
+      <stop offset="1" stop-color="#C01F28"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#bg)"/>
+  <rect x="34" y="34" width="188" height="188" rx="34" fill="url(#red)"/>
+  <circle cx="128" cy="100" r="31" fill="#FFFFFF"/>
+  <path d="M128 142 C 95 142 68 169 68 207 Q 68 215 76 215 L 180 215 Q 188 215 188 207 C 188 169 161 142 128 142 Z"
+        fill="#FFFFFF"/>
+</svg>

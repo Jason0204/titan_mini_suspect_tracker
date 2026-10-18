@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!--
+    Titan Mini Suspect Tracker 应用图标（完整版，>=48px 使用）。
+    语义：深色石墨底（与 UI 主题一致）+ 红色嫌疑人框（UI 里烧在录像上的红框）
+    + 白色行人（被锁定的目标）+ 取景角标（检测结果框）。
+    重新生成 ico/png：.venv/Scripts/python.exe src/tools/make_icon.py
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#232E40"/>
+      <stop offset="1" stop-color="#121821"/>
+    </linearGradient>
+    <linearGradient id="red" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F24B51"/>
+      <stop offset="1" stop-color="#C01F28"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#bg)"/>
+  <rect x="34" y="34" width="188" height="188" rx="34" fill="url(#red)"/>
+  <path d="M 56 86 L 56 62 Q 56 54 64 54 L 88 54
+           M 168 54 L 192 54 Q 200 54 200 62 L 200 86
+           M 200 170 L 200 194 Q 200 202 192 202 L 168 202
+           M 88 202 L 64 202 Q 56 202 56 194 L 56 170"
+        fill="none" stroke="#141B26" stroke-width="11" stroke-linecap="round"/>
+  <circle cx="128" cy="100" r="31" fill="#FFFFFF"/>
+  <path d="M128 142 C 95 142 68 169 68 207 Q 68 215 76 215 L 180 215 Q 188 215 188 207 C 188 169 161 142 128 142 Z"
+        fill="#FFFFFF"/>
+</svg>
