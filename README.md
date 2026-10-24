@@ -125,4 +125,7 @@ CDC 二进制协议：`SYNC → GET_CAPS → SET_CAPS → CHANNEL_LIST` 握手�
 通道（RAM 执行、不落盘），图像走 `stream` 通道，检测结果经 `stdout` 以 JSON Lines 回传。
 实现细节见 `docs/engineering_overview.md` 第 3、4 章。
 
+## OpenMV固件更改
 
+Titan_Mini_Openmv.7z 压缩包是Openmv固件，更改LCD配置，适配AT070TN83 800x480分辨率触摸屏，目前只更新lcd驱动，
+电容触摸部分待完善。

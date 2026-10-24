@@ -40,7 +40,6 @@ pip-wheel-metadata/
 *.dll
 *.msi
 *.zip
-*.7z
 *.tar.gz
 
 
