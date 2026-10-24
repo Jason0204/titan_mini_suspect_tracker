@@ -26,9 +26,6 @@ class VideoDisplay(QLabel):
         self._detections: list[Detection] = []
         self._source_pixmap: QPixmap | None = None
 
-    def set_source_size(self, width: int, height: int) -> None:
-        self._source_size = (width, height)
-
     def set_video_image(self, image: QImage) -> None:
         # Changed 2026-09-20: Preserve the original frame for accurate resizing.
         self._source_size = (image.width(), image.height())

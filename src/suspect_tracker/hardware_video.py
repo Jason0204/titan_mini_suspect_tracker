@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
+from suspect_tracker.device_script import inline_modules
 from suspect_tracker.openmv_protocol import (
     PIXFORMAT_GRAYSCALE,
     PIXFORMAT_JPEG,
@@ -52,6 +53,21 @@ FRAME_SIZE_OPTIONS: dict[str, tuple[int, int]] = {
     "VGA": (640, 480),
 }
 DEFAULT_FRAME_SIZE = "QVGA"
+
+# Changed 2026-10-18: Two device pages, one workflow. Both scripts are self-contained and
+# dual-mode: they run standalone on the board AND serve the host over the same `stream` +
+# `stdout` channels. The picker only decides which text the host uploads on connect.
+#   headless -- maximum frame budget, no panel work.
+#   lcd      -- the on-panel page keeps rendering while the host streams; capture stays QVGA
+#               because the page geometry (video area 320x240 inside a 400x240 canvas) is
+#               fixed, so a VGA frame would not fit the layout.
+DEVICE_PAGES: dict[str, str] = {
+    # lcd first: it is the default page -- uploading the headless script would stop the
+    # on-panel page (and blank the LCD), so "LCD 页面" must be what a plain connect gives.
+    "lcd": "titan_lcd_monitor.py",
+    "headless": "openmv_ae3_raw_jpeg.py",
+}
+DEFAULT_DEVICE_PAGE = "lcd"
 
 
 class _OpenMVFrameReader(QThread):
@@ -162,6 +178,10 @@ class _OpenMVFrameReader(QThread):
                 # Changed 2026-10-13: stdout also carries REPL banners and tracebacks, so a
                 # line that is not one of our JSON events is expected and simply skipped.
                 continue
+            if frame.kind == "telemetry":
+                # Changed 2026-10-18: The device pages emit periodic frame-cost diagnostics;
+                # they are for logs and experiments, not for the operator's event log.
+                continue
             if frame.name == "tracks_update":
                 self._latest_detections = self._parse_detections(frame)
                 # Changed 2026-10-14: The script reports its own capture rate; keep the latest.
@@ -169,6 +189,13 @@ class _OpenMVFrameReader(QThread):
                     self._device_fps = float(frame.payload.get("fps") or 0.0)
                 except (TypeError, ValueError, AttributeError):
                     self._device_fps = 0.0
+                continue
+            if frame.name in ("underflow", "underflow_relief"):
+                # Changed 2026-10-18i: GLCDC underflow is a hardware-health datum for the
+                # investigation record only. It is deliberately kept out of the operator's
+                # event log and out of the panel: fps/infer/present next to the count in
+                # hardware.log is what a later diagnosis needs.
+                log_openmv_event("Device %s: %s" % (frame.name, frame.payload))
                 continue
             self.event_received.emit(frame)
 
@@ -275,22 +302,6 @@ def parse_frame_packet(packet: bytes) -> HardwareFrame:
     )
 
 
-def build_frame_packet(frame: HardwareFrame) -> bytes:
-    header = HEADER_STRUCT.pack(
-        MAGIC,
-        1,
-        int(frame.pixel_format),
-        HEADER_SIZE,
-        len(frame.payload),
-        frame.width,
-        frame.height,
-        frame.stride,
-        frame.frame_id,
-        frame.timestamp_us,
-    )
-    return header + frame.payload
-
-
 def decode_hardware_frame(frame: HardwareFrame) -> np.ndarray:
     if frame.width <= 0 or frame.height <= 0:
         raise ValueError("Frame width and height must be positive")
@@ -394,10 +405,6 @@ class HardwareVideoSource(QObject):
     def submit_packet(self, packet: bytes, detections: list[Detection] | None = None) -> None:
         self.packet_received.emit(packet, detections or [])
 
-    def submit_usb_chunk(self, chunk: bytes, detections: list[Detection] | None = None) -> None:
-        for packet in self._assembler.feed(chunk):
-            self.submit_packet(packet, detections)
-
     def _decode_packet(self, packet: bytes, detections: list[Detection]) -> None:
         if not self._running:
             return
@@ -410,30 +417,6 @@ class HardwareVideoSource(QObject):
         self.width = hardware_frame.width
         self.height = hardware_frame.height
         self.frame_ready.emit(image, detections)
-
-
-class _SerialReader(QThread):
-    chunk_received = Signal(bytes)
-    read_error = Signal(str)
-
-    def __init__(self, serial_port) -> None:
-        super().__init__()
-        self._serial_port = serial_port
-        self._stopping = False
-
-    def run(self) -> None:
-        while not self._stopping:
-            try:
-                chunk = self._serial_port.read(4096)
-            except Exception as exc:
-                if not self._stopping:
-                    self.read_error.emit(str(exc))
-                return
-            if chunk:
-                self.chunk_received.emit(chunk)
-
-    def stop(self) -> None:
-        self._stopping = True
 
 
 class OpenMVSerialVideoSource(HardwareVideoSource):
@@ -451,6 +434,12 @@ class OpenMVSerialVideoSource(HardwareVideoSource):
         # FRAME_SIZE_OPTIONS). Applied on the next connect, because the host uploads the
         # script text at connection time.
         self.frame_size = DEFAULT_FRAME_SIZE
+        # Changed 2026-10-18: Which device page the host uploads on connect (headless or the
+        # on-panel LCD page). Applied on the next connect, like frame_size.
+        self.device_page = DEFAULT_DEVICE_PAGE
+        # Changed 2026-10-18e: set by disconnect_device() when the offline guard app was
+        # started before the port closed, so the UI can log what the board is doing now.
+        self.guard_started = False
         # Changed 2026-10-12: Not every firmware can host a custom channel; video still works.
         self.control_available = False
         # Changed 2026-10-12: Watchdog state. A connected-but-black panel used to stay silent
@@ -467,7 +456,14 @@ class OpenMVSerialVideoSource(HardwareVideoSource):
 
         return [port.device for port in list_ports.comports()]
 
-    def connect_device(self, port: str, baudrate: int = 921600, frame_size: str = DEFAULT_FRAME_SIZE) -> None:
+    def connect_device(
+        self,
+        port: str,
+        baudrate: int = 921600,
+        frame_size: str = DEFAULT_FRAME_SIZE,
+        device_page: str = DEFAULT_DEVICE_PAGE,
+        page_language: str = "zh",
+    ) -> None:
         if self._serial_port is not None:
             raise RuntimeError("OpenMV device is already connected")
         if not port:
@@ -475,6 +471,14 @@ class OpenMVSerialVideoSource(HardwareVideoSource):
         import serial
 
         frame_size = frame_size if frame_size in FRAME_SIZE_OPTIONS else DEFAULT_FRAME_SIZE
+        # Changed 2026-10-18: The LCD page's layout assumes a 320x240 video area, so VGA is
+        # not offered together with it.
+        if device_page == "lcd":
+            frame_size = "QVGA"
+        self.device_page = device_page if device_page in DEVICE_PAGES else DEFAULT_DEVICE_PAGE
+        # Changed 2026-10-18d: the LCD page mirrors the host UI language; the substitution
+        # happens in _script_text, standalone (SD) keeps "zh".
+        self.page_language = page_language if page_language in ("zh", "en") else "zh"
         self.frame_size = frame_size
         self.width, self.height = FRAME_SIZE_OPTIONS[frame_size]
 
@@ -492,13 +496,19 @@ class OpenMVSerialVideoSource(HardwareVideoSource):
             client = OpenMVProtocolClient(serial_port, timeout=2.0, trace=log_openmv_event)
             channels = client.connect()
             log_openmv_event(f"OpenMV protocol connected; channels={channels}")
-            client.stop_script()
+            # Changed 2026-10-18g: wait for the previous script to actually unwind instead of
+            # sleeping a fixed 0.5 s. Right after power-on the board is running the offline
+            # guard, which may be closing an MJPEG segment on the SD card; the old fixed sleep
+            # let the page upload interrupt that cleanup halfway, so the new page inherited a
+            # camera that was never shut down and the panel flickered until the next connect.
+            settled = client.stop_script_and_wait()
             log_openmv_event(
-                f"OpenMV existing script stopped; uploading AE3 capture script "
+                f"OpenMV existing script stopped"
+                f"{f' (unwound in {settled:.2f}s)' if settled is not None else ' (REPL prompt not seen, continuing)'}; "
+                f"uploading the {self.device_page!r} device page "
                 f"(frame size {frame_size} = {self.width}x{self.height})"
             )
-            time.sleep(0.5)
-            client.run_script(self._script_text())
+            client.run_script_recovering(self._script_text())
             # Changed 2026-10-12: Give the device time to finish starting the script and
             # resetting its protocol counters before the host polls the channel list.
             time.sleep(0.3)
@@ -589,6 +599,35 @@ class OpenMVSerialVideoSource(HardwareVideoSource):
             self._client.set_streaming(False)
             log_openmv_event("OpenMV streaming disabled (STREAM_CTRL=0)")
 
+    def apply_page_language(self, language: str) -> bool:
+        # Changed 2026-10-18e: switching the host language while connected re-uploads the LCD
+        # page with the new PAGE_LANGUAGE, so the panel mirrors the host immediately. The
+        # firmware has no channel into a running script (stdin carries script uploads only),
+        # so a re-upload is the only way; it costs a ~1.5 s video gap and is therefore only
+        # ever called on an explicit user action (the language combo), never automatically.
+        if self._client is None or self.device_page != "lcd":
+            return False
+        language = language if language in ("zh", "en") else "zh"
+        if language == self.page_language:
+            return False
+        self.page_language = language
+        was_running = self._running
+        log_openmv_event(f"Re-uploading the LCD page to mirror host language {language!r}")
+        # Changed 2026-10-18g: same hand-over rule as connect/disconnect -- let the old page
+        # finish its finally before the EXEC interrupt lands in it.
+        self._client.stop_script_and_wait()
+        # Changed 2026-10-18f: the page re-upload hits the same wedged-stdin window as the
+        # disconnect handover, so it goes through the recovering variant; otherwise a single
+        # refused write left the panel on the old language.
+        if self._client.run_script_recovering(self._script_text()):
+            log_openmv_event("LCD page upload needed a re-handshake; language mirrored anyway")
+        time.sleep(0.2)
+        if was_running:
+            self._client.set_streaming(True)
+            log_openmv_event("OpenMV streaming re-enabled after language switch")
+        self._restart_reader()
+        return True
+
     def _restart_reader(self) -> None:
         # Changed 2026-10-12: Used by the no-frame watchdog to recover a dead/parked reader.
         reader = self._frame_reader
@@ -645,11 +684,12 @@ class OpenMVSerialVideoSource(HardwareVideoSource):
         self._client.write_channel("tracker", frame.to_json_line())
         log_openmv_event(f"OpenMV control command sent: {frame.name} {frame.payload}")
 
-    @staticmethod
-    def _openmv_script_path() -> Path:
+    def _openmv_script_path(self, device_page: str | None = None) -> Path:
         # Changed 2026-10-18: 设备端脚本从 examples/ 移到 src/device/，源码树里不再有
         # 与 src 平级的散落目录；PyInstaller 的 --add-data 目标目录同步改成 device。
-        relative_path = Path("device") / "openmv_ae3_raw_jpeg.py"
+        # Changed 2026-10-18: 页面可选（headless / lcd），两个脚本都放 src/device/。
+        page = device_page or self.device_page
+        relative_path = Path("device") / DEVICE_PAGES[page]
         if getattr(sys, "frozen", False):
             bundle_path = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / relative_path
             if bundle_path.is_file():
@@ -657,11 +697,35 @@ class OpenMVSerialVideoSource(HardwareVideoSource):
         # 源码运行：本文件位于 src/suspect_tracker/，parents[1] 即 src/
         return Path(__file__).resolve().parents[1] / relative_path
 
+    def _offline_script_path(self) -> Path:
+        # Changed 2026-10-18e: the offline guard app ships next to the two online pages.
+        relative_path = Path("device") / "titan_offline_guard.py"
+        if getattr(sys, "frozen", False):
+            bundle_path = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / relative_path
+            if bundle_path.is_file():
+                return bundle_path
+        return Path(__file__).resolve().parents[1] / relative_path
+
     def _script_text(self) -> str:
         # Changed 2026-10-14: The capture script ships with QVGA; the selected frame size is
         # substituted into the text before it is uploaded (the script stays self-contained).
+        # Changed 2026-10-18: The two device pages name their CSI object differently
+        # (csi0 / camera), so both literals are substituted; at most one matches per script.
         source = self._openmv_script_path().read_text(encoding="utf-8")
-        return source.replace("csi0.framesize(csi.QVGA)", f"csi0.framesize(csi.{self.frame_size})")
+        if self.page_language != "zh":
+            # Changed 2026-10-18d: the LCD page carries PAGE_LANGUAGE = "zh" as the standalone
+            # default; swap it before upload so the panel matches the host UI language.
+            source = source.replace('PAGE_LANGUAGE = "zh"', f'PAGE_LANGUAGE = "{self.page_language}"')
+        for object_name in ("csi0", "camera"):
+            source = source.replace(
+                f"{object_name}.framesize(csi.QVGA)",
+                f"{object_name}.framesize(csi.{self.frame_size})",
+            )
+        # Changed 2026-10-19: a page declares `# @@INLINE:<file>@@` where a shared device
+        # module belongs; the module body is spliced in here. That keeps one copy of the
+        # FT5406 touch driver in the repo (src/device/ft5406.py) while every uploaded page
+        # remains a single self-contained script -- no file to keep in sync on the SD card.
+        return inline_modules(source)
 
     def _report_missing_video(self) -> None:
         # Changed 2026-10-12: A connected-but-black panel used to stay silent forever. Now the
@@ -683,10 +747,12 @@ class OpenMVSerialVideoSource(HardwareVideoSource):
             elif self._stall_attempts == 2:
                 log_openmv_event("OpenMV watchdog: still no frames; re-uploading the AE3 capture script")
                 self.diagnostic.emit("Still no frames; re-uploading the AE3 capture script.")
-                self._client.stop_script()
-                time.sleep(0.3)
+                # Changed 2026-10-18g: the page being replaced may still be tearing down.
+                self._client.stop_script_and_wait()
                 # Changed 2026-10-14: Re-upload the same frame size the UI selected.
-                self._client.run_script(self._script_text())
+                # Changed 2026-10-18f: recover from a refused upload instead of leaving the
+                # panel black for the rest of the session.
+                self._client.run_script_recovering(self._script_text())
                 time.sleep(0.3)
                 self._client.set_streaming(True)
                 self._restart_reader()
@@ -714,18 +780,55 @@ class OpenMVSerialVideoSource(HardwareVideoSource):
             reader.stop()
             reader.wait(1500)
         client = self._client
+        guard_started = False
+        # Changed 2026-10-18e: human-readable reason for the UI when the guard handover fails.
+        guard_detail = ""
         if client is not None:
             try:
                 client.set_streaming(False)
-                client.stop_script()
+            except Exception as exc:
+                log_openmv_event(f"Failed to disable OpenMV streaming during disconnect: {exc}")
+            # Changed 2026-10-18g: wait for the page's finally to finish instead of sleeping
+            # a fixed second. The EXEC ioctl schedules its own KeyboardInterrupt, so uploading
+            # early lands that interrupt inside the finally and aborts it (measured on
+            # hardware): the guard would then start on a half-closed display.
+            try:
+                settled = client.stop_script_and_wait()
+                log_openmv_event(
+                    "OpenMV camera script stopped"
+                    + (f" (unwound in {settled:.2f}s)" if settled is not None else " (no REPL prompt)")
+                )
             except Exception as exc:
                 log_openmv_event(f"Failed to stop OpenMV camera script during disconnect: {exc}")
+            # Changed 2026-10-18e: clicking disconnect hands the board over to the offline
+            # guard app (its own LCD page, MJPEG recording and event log on the SD card)
+            # instead of leaving the panel dead. The guard script is uploaded like any other
+            # page because the firmware has no way to exec a script already on the SD card
+            # through the serial protocol. /main.py holds the same text for power-on
+            # autostart, so both entry points run the identical application.
+            try:
+                guard_path = self._offline_script_path()
+                if guard_path.is_file():
+                    guard_text = guard_path.read_text(encoding="utf-8")
+                    client.run_script_recovering(guard_text)
+                    time.sleep(0.5)  # let the device start the guard before the port closes
+                    guard_started = True
+                    log_openmv_event("Offline guard app started; closing the serial port")
+                    self.diagnostic.emit("Device handed over to the offline guard app.")
+                else:
+                    guard_detail = f"offline guard script not found: {guard_path}"
+                    log_openmv_event(guard_detail)
+            except Exception as exc:
+                guard_detail = f"{type(exc).__name__}: {exc}"
+                log_openmv_event(f"Failed to start the offline guard app: {guard_detail}")
         self._frame_reader = None
         self._client = None
         serial_port = self._serial_port
         if serial_port is not None:
             serial_port.close()
             self._serial_port = None
+        self.guard_started = guard_started
+        self.offline_guard_detail = guard_detail
 
     def _decode_packet(self, packet: bytes, detections: list[Detection]) -> None:
         if not self._running:

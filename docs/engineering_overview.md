@@ -1,10 +1,5 @@
 # Titan 嫌疑人追踪系统 · 工程介绍
 
-文中的框图在 `docs/diagrams/*.png`（独立图片，可直接取用）；源文件与生成脚本是
-`docs/diagrams/build_diagrams.py` + `render_svg.py`，改图请改脚本重新生成，不要手改 SVG。
-
----
-
 ## 0. 速览
 
 | 项目 | 内容 |
@@ -55,8 +50,6 @@
 titan_mini_suspect_tracker/
 ├── src/
 │   ├── suspect_tracker/      上位机应用包（PYTHONPATH=src 后 python -m suspect_tracker 启动）
-│   ├── device/               设备端 MicroPython 脚本，连接时上传，不在本机执行
-│   └── tests/                验证脚本（不参与打包）
 ├── docs/                     工程介绍、协议说明、排查记录、diagrams/*.png
 ├── build_exe.ps1             PyInstaller 打包
 ├── run_ui.bat                源码方式启动
@@ -81,10 +74,7 @@ titan_mini_suspect_tracker/
 | `src/suspect_tracker/ui/i18n.py` | 中英文案 + 驱动英文诊断的本地化重渲染 |
 | `src/suspect_tracker/ui/themes.py` | 三套 QSS 配色 |
 | `src/device/openmv_ae3_raw_jpeg.py` | **设备端脚本（唯一真源）**，IDE 与上位机共用同一份文本 |
-| `src/tests/probe_ui_smoke.py` | 离屏跑完整 UI（点选、锁定、录像、i18n） |
-| `src/tests/probe_suspect_lock.py` | 身份保持算法纯逻辑测试（无 Qt / 无硬件） |
-| `src/tests/probe_single_instance.py` | 单实例护栏的跨进程测试 |
-| `src/tests/probe_ui_layout.py` | 真实 Qt 平台截图，目检布局 |
+|                                           |                                                              |
 
 ---
 

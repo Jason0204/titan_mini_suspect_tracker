@@ -20,9 +20,12 @@ UI 仅提供 OpenMV AE3 硬件连接，全程使用 OpenMV 固件自带的 CDC �
 ```
 src/
 ├── suspect_tracker/        上位机应用包（PYTHONPATH=src 后 python -m suspect_tracker）
+│   └── assets/             icon.svg / icon-small.svg / icon.ico / icon.png
 ├── device/                 设备端 MicroPython 脚本，连接时经 stdin 上传，不在本机执行
-└── tests/                  验证脚本，直接运行，不参与打包
-docs/                       工程介绍、协议说明、排查记录、diagrams/*.png 框图
+│                           openmv_ae3_raw_jpeg.py  headless 采集
+│                           titan_lcd_monitor.py   在线 LCD 页面
+│                           titan_offline_guard.py 离线守卫（断开/断电后自跑）
+docs/                       工程介绍、协议说明、diagrams/*.png 框图
 build_exe.ps1               PyInstaller 打包（spec 由它自动生成，不入库）
 run_ui.bat                  源码方式启动
 ```
@@ -63,6 +66,25 @@ python -m suspect_tracker
 - 录像模式：手动模式由操作员控制；自动模式在锁定嫌疑人后开始，在清除标记或丢失目标后结束。
 - 输出路径：日志写入 `<程序目录>\log\{ui_events,hardware,startup}_YYYY-MM-DD.log`（按天分文件），
   录像写入 `<程序目录>\recordings\`；程序目录不可写时回退到 `%LOCALAPPDATA%\TitanSuspectTracker`。
+- 板端页面：连接前可选「LCD 页面」（板子屏幕显示监测页，强制 QVGA）或「headless」（只推流，不占屏）。
+- 应用图标：`src/suspect_tracker/assets/icon.ico`，由 `src/tools/make_icon.py` 从 SVG 生成。
+
+## 板端离线守卫（断开后板子自己干活）
+
+上位机点「断开」或直接关闭窗口后，板子会**自动切换到离线守卫**：屏幕换成守卫页面，
+自己检测行人、自己把录像与日志写进 SD 卡的 `/tracker/`；断电重启后 SD 根 `main.py`
+是同一份脚本，会自启。
+
+- 录像段是**标准 AVI（MJPG 编码）**，`boot{启动序号}_{段号}.avi`，Windows 播放器 / VLC 直接播
+- 日志是纯文本 `log/guard_boot{NNN}.log`，和录像同在 SD 卡上
+- 自动锁定画面中最大（最近）的人为目标：红框跟随，录像只烧目标框；触摸屏硬件不通时
+  目标改由板载 **USER_KEY** 干预——单击确认/重新武装，双击切换目标，长按清除锁定（全员全录）
+- 段收尾后 1.5 s 自动重新武装（不再有等待期漏录）
+- 录像占用超过卡容量 70% 时，从最旧的段开始回收
+- LCD 第 7 行显示「存储 0.0/3.7G」，颜色随占用率变化
+
+页面布局、字模管线、录像与 SD 保护策略、交接时序的完整说明见
+
 
 ## OpenMV 控制通道
 
@@ -103,22 +125,4 @@ CDC 二进制协议：`SYNC → GET_CAPS → SET_CAPS → CHANNEL_LIST` 握手�
 通道（RAM 执行、不落盘），图像走 `stream` 通道，检测结果经 `stdout` 以 JSON Lines 回传。
 实现细节见 `docs/engineering_overview.md` 第 3、4 章。
 
-## 已移除的板端独立应用
 
-2026-10-16 ~ 10-17 期间做过一版脱离 USB、直接跑在板上的独立应用（`titan_standalone_tracker.py`，
-800x480 LCD + SD 卡录像），但尝试过多种方法无果。该方向已于 2026-10-18 停止，相关源码与
-设备端截图都已从仓库删除。
-
-## 常见问题
-
-**`pip install -r requirements.txt` 报 `UnicodeDecodeError: 'gbk' codec can't decode byte ...`**
-
-pip 用系统区域编码（中文 Windows 是 cp936/GBK）读取 requirements 文件，文件里只要有一个
-非 ASCII 字节（比如中文注释），解析阶段就会直接崩，还没开始装包。本仓库的
-`requirements.txt` / `requirements-build.txt` **强制保持纯 ASCII**；如果你本地改过它们，
-请把注释改回英文，或在文件首行加 `# -*- coding: utf-8 -*-`。
-
-**`build_exe.ps1` / `run_ui.bat` 报找不到 Python 环境**
-
-两个脚本都会依次探测 `.venv`、`ui_venv`、`venv`。虚拟环境叫别的名字时，
-`build_exe.ps1` 可用 `.\build_exe.ps1 -Venv myenv` 指定；`run_ui.bat` 改脚本里的候选列表即可。

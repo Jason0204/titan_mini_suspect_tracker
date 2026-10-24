@@ -11,6 +11,9 @@ from suspect_tracker.ui.main_window import MainWindow
 
 def _apply_app_identity(app: QApplication) -> None:
     """Window/taskbar icon + taskbar grouping, shared by source runs and frozen builds."""
+    # Changed 2026-10-18: merged from the submission tree. The icon lives in
+    # src/suspect_tracker/assets/ and is found through resources.asset_path() so the same
+    # code works for `python -m suspect_tracker` and for the onefile EXE (_MEIPASS).
     icon_path = asset_path("icon.ico")
     if icon_path.is_file():
         icon = QIcon(str(icon_path))

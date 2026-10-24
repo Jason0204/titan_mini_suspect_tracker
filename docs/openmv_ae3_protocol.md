@@ -281,43 +281,6 @@ MicroPython v1.28.0-openmv-dd984559 on 2026-09-07; RA8P1 Titan Mini with R7KA8P1
 3. host → 设备：**只有 `stdin` 脚本上传这一条路**。要在设备上改变行为，
    需要重新下发脚本（可以把参数直接写进脚本文本），无法向运行中的脚本推送命令。
 
-### host 侧取帧的两个坑（2026-10-12 修复）
-
-1. **不要无条件轮询 `tracker` 通道。** 取帧线程原来每轮先 `read_channel("tracker")`，
-   而本固件没有该通道，`read_channel` 直接抛 `OpenMVProtocolError`，被线程的兜底
-   `except` 捕获后 `return`，**线程在读到第一帧前就退出了**，界面表现为“连接成功但没有图像”。
-   现在 `_OpenMVFrameReader` 只在 `"tracker" in client.channels` 时才轮询事件，
-   运行中若通道消失也只停事件、不停视频。
-2. **单次异常不应终止取帧。** 现在连续 10 次解码/协议失败才上报 `read_error` 并退出，
-   期间通过 `diagnostic` 上报 `OpenMV frame read failed (n/10)`，便于区分偶发抖动与真故障。
-
-另外 host 侧的“启动/停止视频流”**不依赖控制通道**：`OpenMVSerialVideoSource.start()/stop()`
-直接调用 `set_streaming(True/False)`（`STREAM_RAW_CTRL` + `STREAM_CTRL`），
-设备据此推流/停流，冻结帧和续流都正常。因此 `start_stream` / `stop_stream`
-这两个 JSON 命令即使送不到设备，视频功能也不受影响。
-实测 320x240 JPEG 稳定在 ~16 fps（配置 15 fps），停流后再续流可恢复。
-
-### 无帧看门狗（2026-10-12 新增）
-
-现场出现过一次“连接成功但 90 秒无帧”的偶发情况（设备对所有 `CHANNEL_LOCK` 回 NAK `0x04`，
-重新连接后即恢复），原代码对此既不自愈也无日志。现在 `_report_missing_video` 定时器（3 秒）
-会检查帧计数是否前进，未前进则逐级恢复：
-
-| 无帧时长 | 动作 | hardware.log 记录 |
-| --- | --- | --- |
-| 3 s | 重发 `STREAM_CTRL=1` + 重启取帧线程 | `watchdog: no new frames for 3s; re-asserting stream control` |
-| 6 s | `STDIN_STOP` → 重传采集脚本 → `STREAM_CTRL=1` | `watchdog: still no frames; re-uploading the AE3 capture script` |
-| 9 s | 停止看门狗并报错 | `watchdog gave up: ...` |
-
-期间 UI 事件日志会同步提示用户正在恢复。只要画面正常（帧计数在涨），看门狗不做任何事，
-也没有额外开销。若看门狗频繁触发，说明设备/线缆/供电有问题，需按 §9 进一步排查。
-
-### 待决策
-
-`mark_suspect` / `clear_suspect` 等控制命令的通道方案需要重定：
-候选做法是把 ROI 等参数直接拼进下发脚本后重新 `STDIN_STOP -> RESET -> WRITE -> EXEC`
-（代价是重启采集循环），或者另行约定一条设备轮询的信号路径。
-
 
 ### 帧率瓶颈定位与 host 侧优化（2026-10-12 晚）
 

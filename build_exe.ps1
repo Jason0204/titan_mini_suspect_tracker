@@ -27,6 +27,9 @@ if ($LASTEXITCODE -ne 0) {
 # Changed 2026-09-20: Build one self-contained EXE so Python DLLs cannot be separated.
 # Changed 2026-10-18: --icon embeds the icon into the EXE resource (Explorer/taskbar);
 # the assets folder is collected so the runtime window icon resolves from _MEIPASS.
+# Changed 2026-10-18f: every device page must be collected -- the app uploads the page text
+# from _MEIPASS at connect time, so a missing script means "connection failed" on the EXE
+# while the same source run works (the offline guard had never been bundled at all).
 & $python -m PyInstaller `
     --noconfirm `
     --clean `
@@ -36,6 +39,8 @@ if ($LASTEXITCODE -ne 0) {
     --icon "src\suspect_tracker\assets\icon.ico" `
     --paths src `
     --add-data "src\device\openmv_ae3_raw_jpeg.py;device" `
+    --add-data "src\device\titan_lcd_monitor.py;device" `
+    --add-data "src\device\titan_offline_guard.py;device" `
     --add-data "src\suspect_tracker\assets;assets" `
     src\suspect_tracker\__main__.py
 if ($LASTEXITCODE -ne 0) {

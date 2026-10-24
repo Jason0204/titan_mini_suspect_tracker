@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl, Qt
+from PySide6.QtCore import QTimer, QUrl, Qt, QThread, Signal
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
 )
 
 from suspect_tracker.hardware_video import (
+    DEFAULT_DEVICE_PAGE,
+    DEVICE_PAGES,
     FRAME_SIZE_OPTIONS,
     ControlChannelUnavailable,
     OpenMVSerialVideoSource,
@@ -38,6 +40,8 @@ from suspect_tracker.paths import (
     ui_event_log_path,
 )
 from suspect_tracker.protocol import ProtocolFrame, command
+# Changed 2026-10-24: USB MSC export of the guard's SD files (log + rec).
+from suspect_tracker.sd_export import export_files
 from suspect_tracker.suspect_lock import SuspectLock
 from suspect_tracker.ui.i18n import LANGUAGES, diagnostic_text, text
 from suspect_tracker.ui.themes import THEMES, build_stylesheet
@@ -57,6 +61,38 @@ from suspect_tracker.video import (
 AUTOMATIC_RECORDING_STOP_SECONDS = 15.0
 
 
+class _SDExportWorker(QThread):
+    """Runs the USB MSC export off the UI thread (2026-10-24).
+
+    Every update crosses as a signal so the window stays responsive during the
+    copy; the summary dict crosses on success, an operator-readable message on
+    failure.
+    """
+
+    stage_reported = Signal(str)
+    copy_progressed = Signal(int, int, str)
+    export_finished = Signal(bool, str, dict)
+
+    def __init__(self, port: str, dest_dir: Path, parent=None) -> None:
+        super().__init__(parent)
+        self._port = port
+        self._dest_dir = dest_dir
+
+    def run(self) -> None:
+        try:
+            summary = export_files(
+                self._port,
+                self._dest_dir,
+                log=lambda message: log_openmv_event(f"sd_export: {message}"),
+                stage=self.stage_reported.emit,
+                progress=lambda done, total, name: self.copy_progressed.emit(done, total, name),
+            )
+        except Exception as exc:
+            self.export_finished.emit(False, str(exc), {})
+            return
+        self.export_finished.emit(True, "", summary)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, video_source=None) -> None:
         super().__init__()
@@ -71,6 +107,11 @@ class MainWindow(QMainWindow):
         self.theme_key = "graphite"
         self.camera_connected = False
         self.stream_running = False
+        # Changed 2026-10-24: active USB MSC export worker (None when idle).
+        self._export_worker: _SDExportWorker | None = None
+        # Changed 2026-10-18f: True once the close path has already tried to hand the board over
+        # to the offline guard, so the aboutToQuit fallback below never runs the handover twice.
+        self._device_handover_done = False
         # Changed 2026-10-14: Suspects are always auto-labelled now, so the operator no longer
         # types a name; the label is kept only for the tables and the log.
         self.suspect_label = "suspect"
@@ -106,6 +147,12 @@ class MainWindow(QMainWindow):
         self._recording_watchdog.setInterval(1000)
         self._recording_watchdog.timeout.connect(self._check_automatic_recording)
         self._recording_watchdog.start()
+        # Changed 2026-10-18f: closeEvent() covers the window X, but a Windows shutdown/logoff
+        # can end the process without a close event. Hand the board over from aboutToQuit too,
+        # otherwise the LCD is left dark after the operator powers the PC down.
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._release_device_on_quit)
         # Changed 2026-10-14: Tell the operator where the persisted event log lives.
         self._log(text(self.language, "output_directory", path=output_root()))
         self._log(text(self.language, "log_file_hint", path=ui_event_log_path()))
@@ -172,6 +219,21 @@ class MainWindow(QMainWindow):
         self.frame_size_select.setToolTip(
             "采集分辨率；连接相机时生效。VGA 画面更大更清晰，但帧率约减半。"
         )
+        # Changed 2026-10-18: Device page picker. Both pages are dual-mode (standalone + host),
+        # the picker only decides which one the host uploads on connect.
+        self.device_page_select = QComboBox()
+        for page in DEVICE_PAGES:
+            self.device_page_select.addItem("", page)
+        self.device_page_select.setToolTip(
+            "板端页面：决定连接时上传给设备的脚本。"
+            "『LCD 页面』会让屏幕同步显示画面和状态栏，采集固定 QVGA，"
+            "页面语言跟随本软件界面语言。"
+        )
+        self.device_page_label = QLabel()
+        self.device_page_select.currentIndexChanged.connect(self._sync_page_controls)
+        # Changed 2026-10-18: lcd is the default page, but the index signal above fired before
+        # frame_size_select existed (combo was empty then), so sync the initial state by hand.
+        self._sync_page_controls()
         self.recording_mode_select = QComboBox()
         self.recording_mode_select.addItem("", "manual")
         self.recording_mode_select.addItem("", "automatic")
@@ -185,12 +247,15 @@ class MainWindow(QMainWindow):
         # Changed 2026-10-14: Logs and recordings now live in the program directory, so give the
         # operator a shortcut to open it instead of hunting for the folder.
         self.output_button = QPushButton()
+        # Changed 2026-10-24: Export the guard's log/rec off the SD over USB MSC.
+        self.export_button = QPushButton()
         for button in (
             self.connect_button,
             self.stream_button,
             self.clear_button,
             self.record_button,
             self.output_button,
+            self.export_button,
         ):
             button.setMinimumHeight(30)
             button.setMinimumWidth(120)
@@ -205,7 +270,12 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.recording_mode_label, 2, 0)
         control_layout.addWidget(self.recording_mode_select, 2, 1)
         control_layout.addWidget(self.record_button, 2, 2, 1, 2)
-        control_layout.addWidget(self.output_button, 3, 0, 1, 4)
+        # Changed 2026-10-18: Page picker gets its own row; the directory shortcut moves down.
+        control_layout.addWidget(self.device_page_label, 3, 0)
+        control_layout.addWidget(self.device_page_select, 3, 1, 1, 3)
+        # Changed 2026-10-24: the export button shares the directory-shortcut row.
+        control_layout.addWidget(self.output_button, 4, 0, 1, 2)
+        control_layout.addWidget(self.export_button, 4, 2, 1, 2)
         left_layout.addWidget(self.control_box)
 
         right_panel = QWidget()
@@ -276,6 +346,8 @@ class MainWindow(QMainWindow):
         self.record_button.clicked.connect(self._toggle_recording)
         # Changed 2026-10-14: Open the folder that holds the logs and the recordings.
         self.output_button.clicked.connect(self._open_output_directory)
+        # Changed 2026-10-24: USB MSC export of the guard's SD files.
+        self.export_button.clicked.connect(self._export_device_files)
         self.recording_mode_select.currentIndexChanged.connect(self._change_recording_mode)
         self.theme_select.currentIndexChanged.connect(self._change_theme)
         self.language_select.currentIndexChanged.connect(self._change_language)
@@ -314,71 +386,188 @@ class MainWindow(QMainWindow):
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
             self._log(text(self.language, "open_output_directory_failed", path=directory))
 
+    def _export_device_files(self) -> None:
+        """Export the guard's log/rec off the SD over USB MSC (2026-10-24).
+
+        Disconnects the live session first (the device must be quiesced before
+        it reconfigures USB), runs the export on a worker thread, and reconnects
+        automatically when the board has reset -- so a demo can keep going.
+        """
+        if self._export_worker is not None and self._export_worker.isRunning():
+            return
+        port = self.openmv_port.currentText().strip()
+        if not port:
+            self._log(text(self.language, "export_need_port"))
+            return
+        was_connected = self.camera_connected
+        if was_connected:
+            self._disconnect_camera()
+            self._refresh_language()
+        dest = output_root() / "board_exports" / datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._log(text(self.language, "export_started"))
+        self.export_button.setEnabled(False)
+        self._export_worker = _SDExportWorker(port, dest, parent=self)
+        self._export_worker.stage_reported.connect(self._log_export_stage)
+        self._export_worker.copy_progressed.connect(self._log_export_progress)
+        self._export_worker.export_finished.connect(
+            lambda ok, detail, summary: self._export_finished(ok, detail, summary, port, was_connected)
+        )
+        self._export_worker.start()
+
+    def _log_export_stage(self, stage: str) -> None:
+        key = {
+            "serial": "export_stage_serial",
+            "msc": "export_stage_msc",
+            "mount": "export_stage_mount",
+            "copy": None,
+            "reset": "export_stage_reset",
+        }.get(stage)
+        if key:
+            self._log(text(self.language, key))
+
+    def _log_export_progress(self, done: int, total: int, name: str) -> None:
+        # Per-file lines would flood the event log; report every 20th and the last.
+        if total and (done == total or done % 20 == 0):
+            self._log(text(self.language, "export_stage_copy", done=done, total=total))
+
+    def _export_finished(
+        self, ok: bool, detail: str, summary: dict, port: str, was_connected: bool
+    ) -> None:
+        self.export_button.setEnabled(True)
+        self._export_worker = None
+        if not ok:
+            self._log(text(self.language, "export_failed", detail=detail))
+            return
+        self._log(
+            text(
+                self.language,
+                "export_done",
+                log=summary.get("log_files", 0),
+                rec=summary.get("rec_files", 0),
+                failed=summary.get("failed", 0),
+                dest=summary.get("dest", ""),
+            )
+        )
+        dest = summary.get("dest", "")
+        if dest:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(dest))
+        if not was_connected:
+            return
+        if not summary.get("port_back"):
+            self._log(text(self.language, "export_no_port_back"))
+            return
+        self._log(text(self.language, "export_reconnecting", port=port))
+        self._connect_camera()
+
     def _toggle_camera(self) -> None:
+        # Changed 2026-10-24: the connect/disconnect branches were factored out so the
+        # MSC export can auto-reconnect through the exact same path.
         if not self.camera_connected:
-            try:
-                port = self.openmv_port.currentText().strip()
-                frame_size = self.frame_size_select.currentData()
-                log_openmv_event(
-                    f"UI requested OpenMV connection for port {port!r} frame_size={frame_size!r}"
-                )
-                source = OpenMVSerialVideoSource()
-                source.frame_ready.connect(self._handle_video_frame)
-                source.frame_error.connect(
-                    lambda message: self._log(
-                        text(
-                            self.language,
-                            "log_device_error",
-                            detail=diagnostic_text(self.language, message),
-                        )
-                    )
-                )
-                source.diagnostic.connect(self._openmv_log)
-                source.control_event.connect(self._handle_frame)
-                # Changed 2026-10-14: Show the measured frame rates as soon as they are reported.
-                source.stats.connect(self._handle_stats)
-                # Changed 2026-10-14: The capture resolution is baked into the script text that
-                # the host uploads, so it must be passed at connection time.
-                source.connect_device(port, frame_size=frame_size)
-                self.video_source = source
-                self.camera_connected = True
-                self.stream_running = True
-                self.openmv_port.setEnabled(False)
-                self.frame_size_select.setEnabled(False)
-                width, height = source.width, source.height
-                self._log(
-                    text(
-                        self.language,
-                        "log_camera_connected",
-                        port=port,
-                        frame_size=frame_size,
-                        width=width,
-                        height=height,
-                    )
-                )
-            except Exception as exc:
-                log_openmv_event(f"UI connection exception: {type(exc).__name__}: {exc}")
-                self._log(
-                    text(
-                        self.language,
-                        "log_connection_failed",
-                        detail=f"{type(exc).__name__}: {exc}",
-                    )
-                )
-                QMessageBox.critical(self, "Connection failed", str(exc))
+            self._connect_camera()
         else:
-            if self.stream_running:
-                self.video_source.stop()
-                self.stream_running = False
-            self.video_source.disconnect_device()
-            self.video_source = MockVideoSource()
-            self.video_source.frame_ready.connect(self._handle_video_frame)
-            self.camera_connected = False
-            self.openmv_port.setEnabled(True)
-            self.frame_size_select.setEnabled(True)
-            # Changed 2026-10-14: Drop the stale rates so the panel does not show frozen numbers.
-            self._handle_stats(0.0, 0.0)
+            self._disconnect_camera()
         self._refresh_language()
+
+    def _connect_camera(self) -> None:
+        try:
+            port = self.openmv_port.currentText().strip()
+            frame_size = self.frame_size_select.currentData()
+            device_page = self.device_page_select.currentData() or DEFAULT_DEVICE_PAGE
+            log_openmv_event(
+                f"UI requested OpenMV connection for port {port!r} frame_size={frame_size!r} "
+                f"device_page={device_page!r}"
+            )
+            source = OpenMVSerialVideoSource()
+            source.frame_ready.connect(self._handle_video_frame)
+            source.frame_error.connect(
+                lambda message: self._log(
+                    text(
+                        self.language,
+                        "log_device_error",
+                        detail=diagnostic_text(self.language, message),
+                    )
+                )
+            )
+            source.diagnostic.connect(self._openmv_log)
+            source.control_event.connect(self._handle_frame)
+            # Changed 2026-10-14: Show the measured frame rates as soon as they are reported.
+            source.stats.connect(self._handle_stats)
+            # Changed 2026-10-14: The capture resolution is baked into the script text that
+            # the host uploads, so it must be passed at connection time.
+            # Changed 2026-10-18: So is the device page (headless vs the on-panel LCD page).
+            source.connect_device(
+                port,
+                frame_size=frame_size,
+                device_page=device_page,
+                # Changed 2026-10-18d: the LCD page mirrors the UI language, so the panel
+                # and the host always speak the same language for the same operator.
+                page_language=self.language,
+            )
+            self.video_source = source
+            self.camera_connected = True
+            self.stream_running = True
+            self.openmv_port.setEnabled(False)
+            self.frame_size_select.setEnabled(False)
+            self.device_page_select.setEnabled(False)
+            width, height = source.width, source.height
+            self._log(
+                text(
+                    self.language,
+                    "log_camera_connected",
+                    port=port,
+                    frame_size=frame_size,
+                    width=width,
+                    height=height,
+                    page=source.device_page,
+                )
+            )
+        except Exception as exc:
+            log_openmv_event(f"UI connection exception: {type(exc).__name__}: {exc}")
+            self._log(
+                text(
+                    self.language,
+                    "log_connection_failed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            QMessageBox.critical(self, "Connection failed", str(exc))
+
+    def _disconnect_camera(self) -> None:
+        # Changed 2026-10-18e: disconnect_device hands the board to the offline guard
+        # app before closing the port; surface the outcome in the event log.
+        guard_started = bool(getattr(self.video_source, "guard_started", False))
+        guard_detail = str(getattr(self.video_source, "offline_guard_detail", "") or "")
+        if self.stream_running:
+            self.video_source.stop()
+            self.stream_running = False
+        self.video_source.disconnect_device()
+        self.video_source = MockVideoSource()
+        if guard_started:
+            self._log(text(self.language, "log_offline_guard_started"))
+        elif guard_detail:
+            self._log(text(self.language, "log_offline_guard_failed", detail=guard_detail))
+        self.video_source.frame_ready.connect(self._handle_video_frame)
+        self.camera_connected = False
+        self.openmv_port.setEnabled(True)
+        self.frame_size_select.setEnabled(True)
+        self.device_page_select.setEnabled(True)
+        self._sync_page_controls()
+        # Changed 2026-10-14: Drop the stale rates so the panel does not show frozen numbers.
+        self._handle_stats(0.0, 0.0)
+
+    def _sync_page_controls(self) -> None:
+        # Changed 2026-10-18: The LCD page fixes the capture at QVGA because its video area is
+        # a fixed 320x240 inside the canvas, so the resolution picker is meaningless while it
+        # is selected. Snap the selection back instead of letting the combo lie.
+        page = self.device_page_select.currentData()
+        lcd_page = page == "lcd"
+        if lcd_page and self.frame_size_select.currentData() != "QVGA":
+            index = self.frame_size_select.findData("QVGA")
+            if index >= 0:
+                self.frame_size_select.setCurrentIndex(index)
+        self.frame_size_select.setEnabled(
+            not lcd_page and not getattr(self, "camera_connected", False)
+        )
 
     def _refresh_openmv_ports(self) -> None:
         current_port = self.openmv_port.currentText() if hasattr(self, "openmv_port") else ""
@@ -740,19 +929,88 @@ class MainWindow(QMainWindow):
                 self._log(text(self.language, "recording_saved_on_exit", path=saved.resolve()))
             elif path is not None:
                 self._log(text(self.language, "recording_empty"))
-        if self.stream_running:
-            self.video_source.stop()
-        if self.camera_connected:
-            self.video_source.disconnect_device()
+        try:
+            if self.stream_running:
+                self.video_source.stop()
+                self.stream_running = False
+            if self.camera_connected:
+                # Changed 2026-10-18f: closing the window with the X must hand the board over to
+                # the offline guard exactly like the "disconnect" button. This used to call
+                # disconnect_device() and swallow the result, so a failed upload closed the app
+                # silently and left the panel black -- the operator only saw "LCD did not go
+                # offline". Report the outcome, and give the (blocking) handover a visible
+                # "busy" state instead of looking frozen for ~3 s.
+                self.setEnabled(False)
+                QApplication.processEvents()
+                try:
+                    self.video_source.disconnect_device()
+                except Exception as exc:  # never let teardown keep the window open
+                    log_ui_event(f"Device handover on window close raised: {type(exc).__name__}: {exc}")
+                finally:
+                    self.setEnabled(True)
+                    self._device_handover_done = True
+                guard_started = bool(getattr(self.video_source, "guard_started", False))
+                guard_detail = str(getattr(self.video_source, "offline_guard_detail", "") or "")
+                if guard_started:
+                    self._log(text(self.language, "log_offline_guard_started"))
+                elif guard_detail:
+                    self._log(text(self.language, "log_offline_guard_failed", detail=guard_detail))
+        except Exception as exc:
+            log_ui_event(f"Window close teardown failed: {type(exc).__name__}: {exc}")
         super().closeEvent(event)
+
+    def _release_device_on_quit(self) -> None:
+        # Changed 2026-10-18f: last-chance handover for exits that never reach closeEvent
+        # (Windows shutdown/logoff, a forced event-loop stop). Same rule as the disconnect
+        # button: the panel must end up running the offline guard instead of a dead image.
+        if not self.camera_connected or self._device_handover_done:
+            return
+        self._device_handover_done = True
+        try:
+            if self.stream_running:
+                self.video_source.stop()
+                self.stream_running = False
+            self.video_source.disconnect_device()
+        except Exception as exc:
+            log_ui_event(f"Device handover on quit failed: {type(exc).__name__}: {exc}")
+            return
+        if getattr(self.video_source, "guard_started", False):
+            log_ui_event("Board handed over to the offline guard while quitting")
+        else:
+            detail = str(getattr(self.video_source, "offline_guard_detail", "") or "unknown reason")
+            log_ui_event(f"Offline guard not started while quitting: {detail}")
 
     def _change_theme(self) -> None:
         self.theme_key = self.theme_select.currentData()
         self._apply_theme()
 
     def _change_language(self) -> None:
+        previous = self.language
         self.language = self.language_select.currentData()
         self._refresh_language()
+        # Changed 2026-10-18e: the LCD page mirrors the host language. The firmware has no
+        # channel into a running script, so mirroring mid-session requires re-uploading the
+        # page, which briefly interrupts the video (~1.5 s). The user picked the language on
+        # purpose, so the sync happens right here; standalone SD boots stay Chinese.
+        if not self.camera_connected or previous == self.language:
+            return
+        source = self.video_source
+        apply = getattr(source, "apply_page_language", None)
+        if apply is None:  # mock source
+            return
+        try:
+            if apply(self.language):
+                self._log(
+                    text(
+                        self.language,
+                        "log_page_language_synced",
+                        language=text(self.language, f"language_{self.language}"),
+                    )
+                )
+        except Exception as exc:
+            self._log(
+                text(self.language, "log_page_language_failed", detail=f"{type(exc).__name__}: {exc}")
+            )
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(build_stylesheet(THEMES[self.theme_key]))
@@ -778,6 +1036,11 @@ class MainWindow(QMainWindow):
         # Changed 2026-10-14: The old AI-profile / manual-label controls are gone; the same grid
         # cells now carry the capture-resolution picker.
         self.frame_size_label.setText(text(self.language, "frame_size"))
+        # Changed 2026-10-18: The page picker is bilingual like every other control.
+        self.device_page_label.setText(text(self.language, "device_page"))
+        # Changed 2026-10-18: lcd is now the first/default entry, so the indexes flipped.
+        self.device_page_select.setItemText(0, text(self.language, "device_page_lcd"))
+        self.device_page_select.setItemText(1, text(self.language, "device_page_headless"))
         self.recording_mode_label.setText(text(self.language, "recording_mode"))
         self.recording_mode_select.setItemText(0, text(self.language, "recording_manual"))
         self.recording_mode_select.setItemText(1, text(self.language, "recording_automatic"))
@@ -793,6 +1056,8 @@ class MainWindow(QMainWindow):
             text(self.language, "stop_recording" if self.recorder.is_recording else "start_recording")
         )
         self.output_button.setText(text(self.language, "open_output_directory"))
+        # Changed 2026-10-24: the export button is bilingual like every other control.
+        self.export_button.setText(text(self.language, "export_files"))
         self.status_box.setTitle(text(self.language, "status"))
         self.status_label.setText(
             text(self.language, "camera_connected" if self.camera_connected else "camera_disconnected")

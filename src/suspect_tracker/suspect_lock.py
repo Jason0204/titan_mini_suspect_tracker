@@ -221,10 +221,6 @@ class SuspectLock:
     def visible(self) -> bool:
         return self._visible
 
-    @property
-    def signature_available(self) -> bool:
-        return self._signature is not None
-
     # -- commands -------------------------------------------------------------
     def pick(self, track_id: int, detections=None, frame=None) -> None:
         """Lock ``track_id``; the box is looked up in the latest detection report."""

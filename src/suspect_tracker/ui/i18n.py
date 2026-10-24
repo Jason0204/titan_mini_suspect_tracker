@@ -29,6 +29,10 @@ TEXT: dict[str, dict[str, str]] = {
         # Changed 2026-10-14: The AI-profile picker and the manual label box were removed; the
         # slot now selects the capture resolution, which is applied when the camera connects.
         "frame_size": "采集分辨率",
+        # Changed 2026-10-18: The device page picker (headless capture vs the on-panel LCD page).
+        "device_page": "板端页面",
+        "device_page_headless": "无头采集（不占用屏幕）",
+        "device_page_lcd": "LCD 页面（板端同步显示）",
         # Changed 2026-09-20: Add paused-frame selection and trajectory recording terminology.
         "recording_mode": "录像模式",
         "recording_manual": "手动",
@@ -40,6 +44,20 @@ TEXT: dict[str, dict[str, str]] = {
         "clear_mark": "清除标记",
         "start_recording": "开始录像",
         "stop_recording": "停止录像",
+        # Changed 2026-10-24: USB MSC export of the guard's SD files (log + rec).
+        "export_files": "导出录像/日志（U盘模式）",
+        "export_need_port": "请先在『AE3 串口』中选择板卡 COM 口，再导出。",
+        "export_started": "开始导出板卡文件：设备将临时切换 U 盘模式，完成后自动复位。",
+        "export_stage_serial": "连接板卡并停止当前页面……",
+        "export_stage_msc": "已请求设备切换 U 盘模式……",
+        "export_stage_mount": "等待系统识别 SD 卡……",
+        "export_stage_copy": "正在拷贝文件：{done}/{total}",
+        "export_stage_reset": "拷贝完成，等待设备复位……",
+        "export_done": "导出完成：日志 {log} 个、录像 {rec} 个（失败 {failed}）→ {dest}",
+        "export_no_port_back": "设备串口未恢复，面板就绪后请手动点『连接』。",
+        "export_reconnecting": "设备已复位，正在重新连接 {port}……",
+        "export_reconnect_failed": "自动重连失败：{detail}（可稍后手动点『连接』）",
+        "export_failed": "导出失败：{detail}",
         "status": "状态",
         "camera_connected": "相机已连接",
         "camera_disconnected": "相机未连接",
@@ -74,7 +92,15 @@ TEXT: dict[str, dict[str, str]] = {
         "automatic_recording_saved": "嫌疑人已连续丢失 {seconds:.0f} 秒，自动结束并保存录像：{path}",
         "recording_saved_on_exit": "程序退出，已保存录像：{path}",
         # Changed 2026-10-14: Log lines follow the selected language (previously English only).
-        "log_camera_connected": "OpenMV 相机已连接：{port}（{frame_size} {width}x{height}）",
+        "log_camera_connected": "OpenMV 相机已连接：{port}（{frame_size} {width}x{height}，页面 {page}）",
+        # Changed 2026-10-18e: the LCD page re-uploads when the host language changes mid-session.
+        "log_page_language_synced": "板端页面已同步为{language}显示（视频短暂中断后自动恢复）",
+        "log_page_language_failed": "板端页面语言同步失败：{detail}",
+        # Changed 2026-10-18h: 守卫 -> 监控 (panel wording follows, see device/titan_offline_guard.py)
+        "log_offline_guard_started": "已断开，板端已切换到离线监控：自动检测并录像，日志与录像写入 SD 卡 /tracker/",
+        "log_offline_guard_failed": "已断开，但离线监控未能启动：{detail}",
+        "language_zh": "中文",
+        "language_en": "英文",
         "log_connection_failed": "连接失败：{detail}",
         "log_command_not_sent": "命令未发送，相机未连接：{name}",
         "log_command_not_delivered": "命令未能送达：{detail}",
@@ -127,6 +153,10 @@ TEXT: dict[str, dict[str, str]] = {
         # Changed 2026-10-14: The AI-profile picker and the manual label box were removed; the
         # slot now selects the capture resolution, which is applied when the camera connects.
         "frame_size": "Capture Resolution",
+        # Changed 2026-10-18: The device page picker (headless capture vs the on-panel LCD page).
+        "device_page": "Device Page",
+        "device_page_headless": "Headless capture (panel free)",
+        "device_page_lcd": "LCD page (mirrored on panel)",
         # Changed 2026-09-20: Add paused-frame selection and trajectory recording terminology.
         "recording_mode": "Recording Mode",
         "recording_manual": "Manual",
@@ -138,6 +168,20 @@ TEXT: dict[str, dict[str, str]] = {
         "clear_mark": "Clear Mark",
         "start_recording": "Start Recording",
         "stop_recording": "Stop Recording",
+        # Changed 2026-10-24: USB MSC export of the guard's SD files (log + rec).
+        "export_files": "Export Files (USB drive mode)",
+        "export_need_port": "Select the board's COM port under 'AE3 Serial' before exporting.",
+        "export_started": "Export started: the device switches to USB drive mode and resets itself afterwards.",
+        "export_stage_serial": "Connecting and stopping the current page ...",
+        "export_stage_msc": "USB drive mode requested ...",
+        "export_stage_mount": "Waiting for the system to mount the SD card ...",
+        "export_stage_copy": "Copying files: {done}/{total}",
+        "export_stage_reset": "Copy done, waiting for the device to reset ...",
+        "export_done": "Export finished: {log} logs, {rec} recordings ({failed} failed) -> {dest}",
+        "export_no_port_back": "Serial port did not return; press 'Connect' once the panel is ready.",
+        "export_reconnecting": "Device reset, reconnecting to {port} ...",
+        "export_reconnect_failed": "Reconnect failed: {detail} (press 'Connect' to retry)",
+        "export_failed": "Export failed: {detail}",
         "status": "Status",
         "camera_connected": "Camera connected",
         "camera_disconnected": "Camera disconnected",
@@ -172,7 +216,14 @@ TEXT: dict[str, dict[str, str]] = {
         "automatic_recording_saved": "Suspect lost for {seconds:.0f} s; recording stopped and saved: {path}",
         "recording_saved_on_exit": "Program is closing; recording saved: {path}",
         # Changed 2026-10-14: Log lines follow the selected language (previously English only).
-        "log_camera_connected": "OpenMV camera connected: {port} ({frame_size} {width}x{height})",
+        "log_camera_connected": "OpenMV camera connected: {port} ({frame_size} {width}x{height}, page {page})",
+        # Changed 2026-10-18e: the LCD page re-uploads when the host language changes mid-session.
+        "log_page_language_synced": "Device page switched to {language} (video recovers after a short gap)",
+        "log_page_language_failed": "Device page language sync failed: {detail}",
+        "log_offline_guard_started": "Disconnected; the board switched to the offline monitor: it detects and records on its own, logs and recordings go to /tracker/ on the SD card",
+        "log_offline_guard_failed": "Disconnected, but the offline monitor failed to start: {detail}",
+        "language_zh": "Chinese",
+        "language_en": "English",
         "log_connection_failed": "Connection failed: {detail}",
         "log_command_not_sent": "Command not sent; camera is disconnected: {name}",
         "log_command_not_delivered": "Command not delivered: {detail}",

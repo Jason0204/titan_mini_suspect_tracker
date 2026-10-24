@@ -165,6 +165,57 @@ class OpenMVProtocolClient:
     def stop_script(self) -> None:
         self._channel_ioctl(self.channels["stdin"], IOCTL_STDIN_STOP)
 
+    def stop_script_and_wait(self, timeout: float = 5.0) -> float | None:
+        # Changed 2026-10-18g: `stop_script()` only *schedules* a KeyboardInterrupt. A script
+        # sitting in a slow `finally` -- the offline guard closing an MJPEG segment on the SD
+        # card is the real case -- keeps the interpreter busy for another second or more.
+        # Uploading inside that window makes the EXEC ioctl schedule a *second* interrupt,
+        # which lands in the finally and aborts it halfway (measured: the marker the finally
+        # writes last never appeared). The next page then inherits a camera that was never
+        # shut down, and the panel shows the old sensor pipeline fighting the new one: visible
+        # flicker. The friendly REPL prints ">>> " only once the script has fully unwound, so
+        # that prompt is the hand-over signal. Returns the settled time, or None on timeout.
+        tracing = self._trace_enabled
+        # The polling below is dozens of tiny channel reads; keep them out of hardware.log.
+        self._trace_enabled = False
+        try:
+            self._drain_stdout(0.2)
+            started = time.monotonic()
+            try:
+                self.stop_script()
+            except (OpenMVProtocolError, TimeoutError) as exc:
+                self.trace(f"OpenMV stop_script failed: {exc}")
+                return None
+            buffer = bytearray()
+            while time.monotonic() - started < timeout:
+                try:
+                    chunk = self.read_channel("stdout")
+                except (OpenMVProtocolError, TimeoutError):
+                    chunk = b""
+                if chunk:
+                    buffer += chunk
+                    if b">>>" in buffer:
+                        elapsed = time.monotonic() - started
+                        self.trace(f"OpenMV previous script unwound in {elapsed:.2f}s")
+                        return elapsed
+                else:
+                    time.sleep(0.01)
+            self.trace(f"OpenMV previous script did not return to the REPL within {timeout:.1f}s")
+            return None
+        finally:
+            self._trace_enabled = tracing
+
+    def _drain_stdout(self, seconds: float) -> None:
+        # Drop whatever the previous page already printed, so the ">>> " that
+        # stop_script_and_wait() looks for can only be the one the interrupt produces.
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            try:
+                if not self.read_channel("stdout"):
+                    time.sleep(0.01)
+            except (OpenMVProtocolError, TimeoutError):
+                return
+
     def run_script(self, script: str) -> None:
         stdin_channel = self.channels["stdin"]
         self._channel_ioctl(stdin_channel, IOCTL_STDIN_RESET)
@@ -181,6 +232,27 @@ class OpenMVProtocolClient:
         # Changed 2026-10-12: Executing a script restarts the device protocol state, so the
         # device counter can drop back to 0 while the host is still counting upwards.
         self.trace("OpenMV script executed; device protocol counters may have been reset")
+
+    def run_script_recovering(self, script: str) -> bool:
+        # Changed 2026-10-18f: stopping a running page (or letting it finish on its own) can
+        # leave the device's stdin handling in a state where every write is answered with
+        # NAK 0x06 (SEQUENCE), no matter how often we re-sync -- the board simply refuses the
+        # upload. A full re-handshake from scratch does clear it, and that is what connect()
+        # does. Callers that upload a page mid-session (language switch, watchdog re-upload,
+        # offline-guard handover) use this instead of run_script so one wedged attempt cannot
+        # silently leave the panel dead. Returns True when the fallback was needed.
+        try:
+            self.run_script(script)
+            return False
+        except OpenMVProtocolError as exc:
+            self.trace(
+                f"OpenMV script upload refused ({type(exc).__name__}: {exc}); "
+                "re-handshaking with the device and retrying"
+            )
+            self._strict_sequence = True
+            self.connect()
+            self.run_script(script)
+            return True
 
     def set_streaming(self, enabled: bool) -> None:
         stream_channel = self.channels["stream"]
@@ -281,6 +353,13 @@ class OpenMVProtocolClient:
         self._flush_input()
         self.sequence = 0
         self._command(PROTO_SYNC, resync_budget=0)
+        # Changed 2026-10-18f: The device answers PROTO_SYNC with sequence 0 and then expects
+        # the host's next request to carry sequence 0 again; _receive_response already bumped
+        # our counter to 1, so every retried command was rejected with NAK 0x06 (SEQUENCE)
+        # forever. connect() compensates for exactly this after its handshake -- do the same
+        # here, otherwise a resync can never restore alignment. Symptom on hardware: the
+        # offline guard upload after "disconnect"/window close failed in 3 out of 4 runs.
+        self.sequence = 0
         self.trace("OpenMV resync complete; host sequence counter reset to 0")
 
     def _command(
